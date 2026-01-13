@@ -1,0 +1,25 @@
+# Fly.io configuration file
+# Generated for Discord Bot deployment
+
+app = "your-bot-name"  # Change this to your app name
+primary_region = "iad"  # Change to your preferred region (iad = Washington DC, ord = Chicago, etc.)
+
+[build]
+
+[env]
+  # Environment variables will be set via fly secrets
+
+[experimental]
+  auto_rollback = true
+
+# Discord bots don't need HTTP services, they just run continuously
+# No services section needed - the app runs as a process
+
+[deploy]
+  strategy = "immediate"
+
+# VM configuration
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 256
