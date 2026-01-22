@@ -16,7 +16,7 @@ intents.voice_states = True
 intents.message_content = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
-i ftree = bot.tree
+tree = bot.tree
 
 # Settings file to store configuration
 SETTINGS_FILE = 'settings.json'
@@ -37,19 +37,35 @@ def load_settings():
                 settings['allowed_members'] = {}  # {server_id: [member_ids]}
             if 'assigned_admins' not in settings:
                 settings['assigned_admins'] = {}  # {server_id: [member_ids]}
+            if 'unlocked_channels' not in settings:
+                settings['unlocked_channels'] = {}  # {server_id: [channel_ids]}
             return settings
     return {
         'auto_mute': True,
         'auto_camera_off': True,
         'enabled_servers': [],
         'allowed_members': {},  # {server_id: [member_ids]}
-        'assigned_admins': {}  # {server_id: [member_ids]}
+        'assigned_admins': {},  # {server_id: [member_ids]}
+        'unlocked_channels': {}  # {server_id: [channel_ids]} - channels where auto-mute is disabled
     }
 
 def save_settings(settings):
     """Save bot settings to file"""
     with open(SETTINGS_FILE, 'w') as f:
         json.dump(settings, f, indent=4)
+
+def is_channel_unlocked(guild_id, channel_id):
+    """Check if a voice channel is unlocked (excluded from auto-mute)"""
+    settings = load_settings()
+    server_id = str(guild_id)
+    
+    if 'unlocked_channels' not in settings:
+        return False
+    
+    if server_id not in settings['unlocked_channels']:
+        return False
+    
+    return channel_id in settings['unlocked_channels'][server_id]
 
 def is_admin_or_assigned(ctx):
     """Check if member is admin, assigned admin, or in allowed members list"""
@@ -166,7 +182,17 @@ async def on_member_join(member):
     # Check if member is in a voice channel
     if member.voice and member.voice.channel:
         try:
-            # Mute the member
+            # Check if channel is unlocked (excluded from auto-mute)
+            if is_channel_unlocked(member.guild.id, member.voice.channel.id):
+                # Unlocked channel - ensure member is unmuted (free to speak)
+                if member.voice and member.voice.mute:
+                    await member.edit(mute=False)
+                    print(f'Channel {member.voice.channel.name} is unlocked - unmuted {member.name} for free speech')
+                else:
+                    print(f'Channel {member.voice.channel.name} is unlocked - {member.name} can speak freely')
+                return
+            
+            # Mute the member for locked channels
             if settings['auto_mute']:
                 await member.edit(mute=True)
                 print(f'Auto-muted {member.name} in {member.guild.name}')
@@ -199,42 +225,42 @@ async def on_guild_join(guild):
         print(f'Synced {len(synced)} slash command(s) for {guild.name}')
     except Exception as e:
         print(f'Failed to sync commands for {guild.name}: {e}')
+    
+    # Try to send welcome message to system channel or first text channel
+    try:
+        channel = guild.system_channel
+        if channel is None:
+            # Find first text channel bot can send messages to
+            for ch in guild.text_channels:
+                if ch.permissions_for(guild.me).send_messages:
+                    channel = ch
+                    break
         
-        # Try to send welcome message to system channel or first text channel
-        try:
-            channel = guild.system_channel
-            if channel is None:
-                # Find first text channel bot can send messages to
-                for ch in guild.text_channels:
-                    if ch.permissions_for(guild.me).send_messages:
-                        channel = ch
-                        break
-            
-            if channel:
-                embed = discord.Embed(
-                    title='🤖 Bot Added Successfully!',
-                    description='Auto-mute and camera control bot is now active!',
-                    color=discord.Color.green()
-                )
-                embed.add_field(
-                    name='Quick Start',
-                    value='The bot is **automatically enabled** for this server!\n'
-                          'Members will be auto-muted when joining voice channels.\n'
-                          '**Type `/` to see all slash commands!**\n'
-                          'Or use `!help_bot` for prefix commands.',
-                    inline=False
-                )
-                embed.add_field(
-                    name='Admin Commands',
-                    value='`/settings` - View settings\n'
-                          '`/disable` - Disable auto-mute\n'
-                          '`/enable` - Re-enable auto-mute\n'
-                          '**Type `/` to see all commands!**',
-                    inline=False
-                )
-                await channel.send(embed=embed)
-        except Exception as e:
-            print(f'Could not send welcome message to {guild.name}: {e}')
+        if channel:
+            embed = discord.Embed(
+                title='🤖 Bot Added Successfully!',
+                description='Auto-mute and camera control bot is now active!',
+                color=discord.Color.green()
+            )
+            embed.add_field(
+                name='Quick Start',
+                value='The bot is **automatically enabled** for this server!\n'
+                      'Members will be auto-muted when joining voice channels.\n'
+                      '**Type `/` to see all slash commands!**\n'
+                      'Or use `!help_bot` for prefix commands.',
+                inline=False
+            )
+            embed.add_field(
+                name='Admin Commands',
+                value='`/settings` - View settings\n'
+                      '`/disable` - Disable auto-mute\n'
+                      '`/enable` - Re-enable auto-mute\n'
+                      '**Type `/` to see all commands!**',
+                inline=False
+            )
+            await channel.send(embed=embed)
+    except Exception as e:
+        print(f'Could not send welcome message to {guild.name}: {e}')
 
 @bot.event
 async def on_voice_state_update(member, before, after):
@@ -249,14 +275,50 @@ async def on_voice_state_update(member, before, after):
     # If member just joined a voice channel
     if before.channel is None and after.channel is not None:
         try:
-            # Auto-mute
+            # Check if channel is unlocked (excluded from auto-mute)
+            if is_channel_unlocked(member.guild.id, after.channel.id):
+                # Unlocked channel - ensure member is unmuted (free to speak)
+                await asyncio.sleep(0.5)  # Small delay to ensure member is fully in channel
+                if member.voice and member.voice.mute:
+                    await member.edit(mute=False)
+                    print(f'Channel {after.channel.name} is unlocked - unmuted {member.name} for free speech')
+                else:
+                    print(f'Channel {after.channel.name} is unlocked - {member.name} can speak freely')
+                return
+            
+            # Auto-mute for locked channels
             if settings['auto_mute']:
                 await asyncio.sleep(0.5)  # Small delay to ensure member is fully in channel
                 await member.edit(mute=True)
-                print(f'Auto-muted {member.name} when joining voice channel in {member.guild.name}')
+                print(f'Auto-muted {member.name} when joining voice channel {after.channel.name} in {member.guild.name}')
             
             # Note: Discord API doesn't have direct camera control
             # But we can ensure they're muted which is the closest we can get
+        except discord.Forbidden:
+            print(f'No permission to modify {member.name} in {member.guild.name}')
+        except Exception as e:
+            print(f'Error modifying {member.name}: {e}')
+    
+    # If member moved from one channel to another
+    elif before.channel is not None and after.channel is not None and before.channel.id != after.channel.id:
+        try:
+            # Check if the new channel is unlocked
+            if is_channel_unlocked(member.guild.id, after.channel.id):
+                # Moved to unlocked channel - ensure member is unmuted (free to speak)
+                await asyncio.sleep(0.3)  # Small delay
+                if member.voice and member.voice.mute:
+                    await member.edit(mute=False)
+                    print(f'Member {member.name} moved to unlocked channel {after.channel.name} - unmuted for free speech')
+                else:
+                    print(f'Member {member.name} moved to unlocked channel {after.channel.name} - can speak freely')
+                return
+            
+            # Moved to locked channel - apply auto-mute if enabled
+            if settings['auto_mute']:
+                await asyncio.sleep(0.3)  # Small delay
+                if not member.voice.mute:
+                    await member.edit(mute=True)
+                    print(f'Member {member.name} moved to locked channel {after.channel.name} - auto-muted')
         except discord.Forbidden:
             print(f'No permission to modify {member.name} in {member.guild.name}')
         except Exception as e:
@@ -833,6 +895,130 @@ async def show_assigned_admins(ctx):
     
     await ctx.send(embed=embed)
 
+@bot.command(name='unlock_channel')
+async def unlock_channel(ctx, channel: discord.VoiceChannel = None):
+    """Unlock a voice channel (disable auto-mute for this channel) - Admin or Assigned Admin only"""
+    if not is_admin_or_assigned(ctx):
+        await ctx.send('❌ You do not have permission to use this command. Only admins or assigned admins can unlock channels.')
+        return
+    
+    # If no channel specified, use the channel the author is in
+    if channel is None:
+        if ctx.author.voice and ctx.author.voice.channel:
+            channel = ctx.author.voice.channel
+        else:
+            await ctx.send('❌ Please specify a voice channel or join a voice channel first!')
+            return
+    
+    if not isinstance(channel, discord.VoiceChannel):
+        await ctx.send('❌ Please specify a valid voice channel!')
+        return
+    
+    settings = load_settings()
+    server_id = str(ctx.guild.id)
+    
+    # Initialize unlocked_channels if it doesn't exist
+    if 'unlocked_channels' not in settings:
+        settings['unlocked_channels'] = {}
+    if server_id not in settings['unlocked_channels']:
+        settings['unlocked_channels'][server_id] = []
+    
+    # Check if channel is already unlocked
+    if channel.id in settings['unlocked_channels'][server_id]:
+        await ctx.send(f'✅ Channel {channel.mention} is already unlocked! This channel is FREE - members can speak freely like a normal voice channel.')
+        return
+    
+    # Add channel to unlocked list
+    settings['unlocked_channels'][server_id].append(channel.id)
+    save_settings(settings)
+    
+    await ctx.send(
+        f'✅ **Channel {channel.mention} is now unlocked!**\n'
+        f'🔓 This channel is now **FREE** - members can speak freely like a normal voice channel.\n'
+        f'• Members will **NOT** be auto-muted when joining\n'
+        f'• Members will be **automatically unmuted** if they join while muted\n'
+        f'• This channel works exactly like a normal Discord voice channel!'
+    )
+
+@bot.command(name='lock_channel')
+async def lock_channel(ctx, channel: discord.VoiceChannel = None):
+    """Lock a voice channel (enable auto-mute for this channel) - Admin or Assigned Admin only"""
+    if not is_admin_or_assigned(ctx):
+        await ctx.send('❌ You do not have permission to use this command. Only admins or assigned admins can lock channels.')
+        return
+    
+    # If no channel specified, use the channel the author is in
+    if channel is None:
+        if ctx.author.voice and ctx.author.voice.channel:
+            channel = ctx.author.voice.channel
+        else:
+            await ctx.send('❌ Please specify a voice channel or join a voice channel first!')
+            return
+    
+    if not isinstance(channel, discord.VoiceChannel):
+        await ctx.send('❌ Please specify a valid voice channel!')
+        return
+    
+    settings = load_settings()
+    server_id = str(ctx.guild.id)
+    
+    # Check if unlocked_channels exists
+    if 'unlocked_channels' not in settings or server_id not in settings['unlocked_channels']:
+        await ctx.send(f'✅ Channel {channel.mention} is already locked! Members will be auto-muted when joining this channel.')
+        return
+    
+    # Check if channel is in unlocked list
+    if channel.id not in settings['unlocked_channels'][server_id]:
+        await ctx.send(f'✅ Channel {channel.mention} is already locked! Members will be auto-muted when joining this channel.')
+        return
+    
+    # Remove channel from unlocked list
+    settings['unlocked_channels'][server_id].remove(channel.id)
+    save_settings(settings)
+    
+    await ctx.send(
+        f'🔒 **Channel {channel.mention} is now locked!**\n'
+        f'Members will be **auto-muted** when joining this channel.'
+    )
+
+@bot.command(name='unlocked_channels')
+async def show_unlocked_channels(ctx):
+    """Show all unlocked voice channels - Admin or Assigned Admin only"""
+    if not is_admin_or_assigned(ctx):
+        await ctx.send('❌ You do not have permission to use this command. Only admins or assigned admins can view unlocked channels.')
+        return
+    
+    settings = load_settings()
+    server_id = str(ctx.guild.id)
+    
+    # Get unlocked channels
+    unlocked_channels = []
+    if 'unlocked_channels' in settings and server_id in settings['unlocked_channels']:
+        for channel_id in settings['unlocked_channels'][server_id]:
+            try:
+                channel = ctx.guild.get_channel(channel_id)
+                if channel:
+                    unlocked_channels.append(channel)
+            except:
+                pass
+    
+    if unlocked_channels:
+        channels_list = '\n'.join([f'• {ch.mention} ({ch.name})' for ch in unlocked_channels])
+        embed = discord.Embed(
+            title='🔓 Unlocked Voice Channels',
+            description=f'Channels where auto-mute is disabled:\n\n{channels_list}',
+            color=discord.Color.green()
+        )
+        embed.set_footer(text=f'Total: {len(unlocked_channels)} unlocked channel(s)')
+    else:
+        embed = discord.Embed(
+            title='🔓 Unlocked Voice Channels',
+            description='No channels are unlocked. All voice channels will auto-mute members.\n\nUse `!unlock_channel <channel>` to unlock a channel.',
+            color=discord.Color.orange()
+        )
+    
+    await ctx.send(embed=embed)
+
 @bot.command(name='help_bot')
 async def help_command(ctx):
     """Show all available commands"""
@@ -850,6 +1036,9 @@ async def help_command(ctx):
 `!toggle_autocam` - Turn auto camera-off ON/OFF
 `!enable` - Enable bot for this server
 `!disable` - Disable bot for this server
+`!unlock_channel [channel]` - Unlock a voice channel (no auto-mute)
+`!lock_channel [channel]` - Lock a voice channel (enable auto-mute)
+`!unlocked_channels` - Show all unlocked channels
         ''',
         inline=False
     )
@@ -1275,6 +1464,131 @@ async def slash_sync(interaction: discord.Interaction):
     except Exception as e:
         await interaction.followup.send(f'❌ Failed to sync commands: {e}', ephemeral=True)
 
+@tree.command(name="unlock_channel", description="Unlock a voice channel (disable auto-mute for this channel)")
+@app_commands.describe(channel="The voice channel to unlock (leave empty for current channel)")
+async def slash_unlock_channel(interaction: discord.Interaction, channel: Optional[discord.VoiceChannel] = None):
+    """Unlock a voice channel"""
+    if interaction.guild is None:
+        await interaction.response.send_message('❌ This command can only be used in a server!', ephemeral=True)
+        return
+    
+    if not is_admin_or_assigned_interaction(interaction):
+        await interaction.response.send_message('❌ You do not have permission to use this command. Only admins or assigned admins can unlock channels.', ephemeral=True)
+        return
+    
+    # If no channel specified, use the channel the user is in
+    voice_channel = channel
+    if voice_channel is None:
+        if interaction.user.voice and interaction.user.voice.channel:
+            voice_channel = interaction.user.voice.channel
+        else:
+            await interaction.response.send_message('❌ Please specify a voice channel or join a voice channel first!', ephemeral=True)
+            return
+    
+    settings = load_settings()
+    server_id = str(interaction.guild.id)
+    
+    if 'unlocked_channels' not in settings:
+        settings['unlocked_channels'] = {}
+    if server_id not in settings['unlocked_channels']:
+        settings['unlocked_channels'][server_id] = []
+    
+    if voice_channel.id in settings['unlocked_channels'][server_id]:
+        await interaction.response.send_message(f'✅ Channel {voice_channel.mention} is already unlocked! This channel is FREE - members can speak freely like a normal voice channel.')
+        return
+    
+    settings['unlocked_channels'][server_id].append(voice_channel.id)
+    save_settings(settings)
+    
+    await interaction.response.send_message(
+        f'✅ **Channel {voice_channel.mention} is now unlocked!**\n'
+        f'🔓 This channel is now **FREE** - members can speak freely like a normal voice channel.\n'
+        f'• Members will **NOT** be auto-muted when joining\n'
+        f'• Members will be **automatically unmuted** if they join while muted\n'
+        f'• This channel works exactly like a normal Discord voice channel!'
+    )
+
+@tree.command(name="lock_channel", description="Lock a voice channel (enable auto-mute for this channel)")
+@app_commands.describe(channel="The voice channel to lock (leave empty for current channel)")
+async def slash_lock_channel(interaction: discord.Interaction, channel: Optional[discord.VoiceChannel] = None):
+    """Lock a voice channel"""
+    if interaction.guild is None:
+        await interaction.response.send_message('❌ This command can only be used in a server!', ephemeral=True)
+        return
+    
+    if not is_admin_or_assigned_interaction(interaction):
+        await interaction.response.send_message('❌ You do not have permission to use this command. Only admins or assigned admins can lock channels.', ephemeral=True)
+        return
+    
+    # If no channel specified, use the channel the user is in
+    voice_channel = channel
+    if voice_channel is None:
+        if interaction.user.voice and interaction.user.voice.channel:
+            voice_channel = interaction.user.voice.channel
+        else:
+            await interaction.response.send_message('❌ Please specify a voice channel or join a voice channel first!', ephemeral=True)
+            return
+    
+    settings = load_settings()
+    server_id = str(interaction.guild.id)
+    
+    if 'unlocked_channels' not in settings or server_id not in settings['unlocked_channels']:
+        await interaction.response.send_message(f'✅ Channel {voice_channel.mention} is already locked! Members will be auto-muted when joining this channel.')
+        return
+    
+    if voice_channel.id not in settings['unlocked_channels'][server_id]:
+        await interaction.response.send_message(f'✅ Channel {voice_channel.mention} is already locked! Members will be auto-muted when joining this channel.')
+        return
+    
+    settings['unlocked_channels'][server_id].remove(voice_channel.id)
+    save_settings(settings)
+    
+    await interaction.response.send_message(
+        f'🔒 **Channel {voice_channel.mention} is now locked!**\n'
+        f'Members will be **auto-muted** when joining this channel.'
+    )
+
+@tree.command(name="unlocked_channels", description="Show all unlocked voice channels")
+async def slash_unlocked_channels(interaction: discord.Interaction):
+    """Show all unlocked voice channels"""
+    if interaction.guild is None:
+        await interaction.response.send_message('❌ This command can only be used in a server!', ephemeral=True)
+        return
+    
+    if not is_admin_or_assigned_interaction(interaction):
+        await interaction.response.send_message('❌ You do not have permission to use this command. Only admins or assigned admins can view unlocked channels.', ephemeral=True)
+        return
+    
+    settings = load_settings()
+    server_id = str(interaction.guild.id)
+    
+    unlocked_channels = []
+    if 'unlocked_channels' in settings and server_id in settings['unlocked_channels']:
+        for channel_id in settings['unlocked_channels'][server_id]:
+            try:
+                channel = interaction.guild.get_channel(channel_id)
+                if channel:
+                    unlocked_channels.append(channel)
+            except:
+                pass
+    
+    if unlocked_channels:
+        channels_list = '\n'.join([f'• {ch.mention} ({ch.name})' for ch in unlocked_channels])
+        embed = discord.Embed(
+            title='🔓 Unlocked Voice Channels',
+            description=f'Channels where auto-mute is disabled:\n\n{channels_list}',
+            color=discord.Color.green()
+        )
+        embed.set_footer(text=f'Total: {len(unlocked_channels)} unlocked channel(s)')
+    else:
+        embed = discord.Embed(
+            title='🔓 Unlocked Voice Channels',
+            description='No channels are unlocked. All voice channels will auto-mute members.\n\nUse `/unlock_channel` to unlock a channel.',
+            color=discord.Color.orange()
+        )
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 @tree.command(name="help", description="Show all available commands")
 async def slash_help(interaction: discord.Interaction):
     """Show all available commands"""
@@ -1292,6 +1606,9 @@ async def slash_help(interaction: discord.Interaction):
 `/toggle_autocam` - Turn auto camera-off ON/OFF
 `/enable` - Enable bot for this server
 `/disable` - Disable bot for this server
+`/unlock_channel [channel]` - Unlock a voice channel (no auto-mute)
+`/lock_channel [channel]` - Lock a voice channel (enable auto-mute)
+`/unlocked_channels` - Show all unlocked channels
         ''',
         inline=False
     )
