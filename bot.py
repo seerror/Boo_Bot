@@ -1,9 +1,11 @@
 import discord
 from discord.ext import commands
+from discord import app_commands
 import os
 from dotenv import load_dotenv
 import json
 import asyncio
+from typing import Optional
 
 load_dotenv()
 
@@ -14,6 +16,7 @@ intents.voice_states = True
 intents.message_content = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
+i ftree = bot.tree
 
 # Settings file to store configuration
 SETTINGS_FILE = 'settings.json'
@@ -84,11 +87,55 @@ def is_allowed_member(ctx):
     allowed_ids = settings['allowed_members'][server_id]
     return ctx.author.id in allowed_ids
 
+# Helper functions for slash commands (interactions)
+def is_admin_or_assigned_interaction(interaction: discord.Interaction):
+    """Check if member is admin or assigned admin for slash commands"""
+    if interaction.user.guild_permissions.administrator:
+        return True
+    
+    settings = load_settings()
+    server_id = str(interaction.guild.id)
+    
+    if 'assigned_admins' in settings and server_id in settings['assigned_admins']:
+        if interaction.user.id in settings['assigned_admins'][server_id]:
+            return True
+    
+    return False
+
+def is_allowed_member_interaction(interaction: discord.Interaction):
+    """Check if member is allowed for slash commands"""
+    if is_admin_or_assigned_interaction(interaction):
+        return True
+    
+    settings = load_settings()
+    server_id = str(interaction.guild.id)
+    
+    if 'allowed_members' not in settings:
+        return False
+    
+    if server_id not in settings['allowed_members']:
+        return False
+    
+    allowed_ids = settings['allowed_members'][server_id]
+    return interaction.user.id in allowed_ids
+
 @bot.event
 async def on_ready():
     print(f'{bot.user} has logged in!')
     print(f'Bot is in {len(bot.guilds)} servers')
     await bot.change_presence(activity=discord.Game(name="Managing voice channels"))
+    
+    # Wait a bit for bot to be fully ready
+    await asyncio.sleep(1)
+    
+    # Sync slash commands globally
+    try:
+        synced = await tree.sync()
+        print(f'Synced {len(synced)} slash command(s) globally')
+    except Exception as e:
+        print(f'Failed to sync slash commands: {e}')
+        import traceback
+        traceback.print_exc()
     
     # Auto-enable bot for all servers it's in
     settings = load_settings()
@@ -144,6 +191,14 @@ async def on_guild_join(guild):
         settings['enabled_servers'].append(guild.id)
         save_settings(settings)
         print(f'Bot added to {guild.name} - Auto-enabled!')
+    
+    # Sync commands for the new guild
+    try:
+        await asyncio.sleep(1)
+        synced = await tree.sync(guild=guild)
+        print(f'Synced {len(synced)} slash command(s) for {guild.name}')
+    except Exception as e:
+        print(f'Failed to sync commands for {guild.name}: {e}')
         
         # Try to send welcome message to system channel or first text channel
         try:
@@ -165,14 +220,16 @@ async def on_guild_join(guild):
                     name='Quick Start',
                     value='The bot is **automatically enabled** for this server!\n'
                           'Members will be auto-muted when joining voice channels.\n'
-                          'Use `!help_bot` to see all commands.',
+                          '**Type `/` to see all slash commands!**\n'
+                          'Or use `!help_bot` for prefix commands.',
                     inline=False
                 )
                 embed.add_field(
                     name='Admin Commands',
-                    value='`!settings` - View settings\n'
-                          '`!disable` - Disable auto-mute\n'
-                          '`!enable` - Re-enable auto-mute',
+                    value='`/settings` - View settings\n'
+                          '`/disable` - Disable auto-mute\n'
+                          '`/enable` - Re-enable auto-mute\n'
+                          '**Type `/` to see all commands!**',
                     inline=False
                 )
                 await channel.send(embed=embed)
@@ -842,6 +899,434 @@ async def help_command(ctx):
     embed.set_footer(text='💡 Tip: Use !settings to see current configuration')
     
     await ctx.send(embed=embed)
+
+# ==================== SLASH COMMANDS ====================
+
+@tree.command(name="settings", description="View current bot settings for this server")
+@app_commands.describe()
+async def slash_settings(interaction: discord.Interaction):
+    """Show current bot settings (Admin or Assigned Admin only)"""
+    if interaction.guild is None:
+        await interaction.response.send_message('❌ This command can only be used in a server!', ephemeral=True)
+        return
+    
+    if not is_admin_or_assigned_interaction(interaction):
+        await interaction.response.send_message('❌ You do not have permission to use this command. Only admins or assigned admins can view settings.', ephemeral=True)
+        return
+    
+    settings = load_settings()
+    enabled = interaction.guild.id in settings['enabled_servers']
+    server_id = str(interaction.guild.id)
+    
+    # Get allowed members list
+    allowed_members = []
+    if 'allowed_members' in settings and server_id in settings['allowed_members']:
+        for member_id in settings['allowed_members'][server_id]:
+            try:
+                member = interaction.guild.get_member(member_id)
+                if member:
+                    allowed_members.append(member.display_name)
+            except:
+                pass
+    
+    # Get assigned admins list
+    assigned_admins = []
+    if 'assigned_admins' in settings and server_id in settings['assigned_admins']:
+        for member_id in settings['assigned_admins'][server_id]:
+            try:
+                member = interaction.guild.get_member(member_id)
+                if member:
+                    assigned_admins.append(member.display_name)
+            except:
+                pass
+    
+    embed = discord.Embed(
+        title='⚙️ Bot Settings for ' + interaction.guild.name,
+        description='Current configuration for this server',
+        color=discord.Color.blue()
+    )
+    embed.add_field(
+        name='📊 Server Status',
+        value='✅ **ENABLED** - Bot is active' if enabled else '❌ **DISABLED** - Bot is inactive',
+        inline=False
+    )
+    embed.add_field(
+        name='🔇 Auto Mute',
+        value='✅ **ON** - Members auto-muted when joining voice' if settings['auto_mute'] else '❌ **OFF** - No auto-mute',
+        inline=True
+    )
+    embed.add_field(
+        name='📹 Auto Camera Off',
+        value='✅ **ON** - Camera/audio disabled by default' if settings['auto_camera_off'] else '❌ **OFF** - Camera/audio allowed',
+        inline=True
+    )
+    
+    if assigned_admins:
+        admins_list = ', '.join(assigned_admins[:10])
+        if len(assigned_admins) > 10:
+            admins_list += f' (+{len(assigned_admins) - 10} more)'
+        embed.add_field(name='👑 Assigned Admins', value=admins_list or 'None', inline=False)
+    else:
+        embed.add_field(name='👑 Assigned Admins', value='None - Only Discord admins can use admin commands', inline=False)
+    
+    if allowed_members:
+        members_list = ', '.join(allowed_members[:10])
+        if len(allowed_members) > 10:
+            members_list += f' (+{len(allowed_members) - 10} more)'
+        embed.add_field(name='👥 Allowed Members', value=members_list or 'None', inline=False)
+    else:
+        embed.add_field(name='👥 Allowed Members', value='None - Only admins can use commands', inline=False)
+    
+    await interaction.response.send_message(embed=embed)
+
+@tree.command(name="enable", description="Enable bot for this server")
+async def slash_enable(interaction: discord.Interaction):
+    """Enable auto-mute and camera-off for this server"""
+    if interaction.guild is None:
+        await interaction.response.send_message('❌ This command can only be used in a server!', ephemeral=True)
+        return
+    
+    if not is_admin_or_assigned_interaction(interaction):
+        await interaction.response.send_message('❌ You do not have permission to use this command. Only admins or assigned admins can enable/disable the bot.', ephemeral=True)
+        return
+    
+    settings = load_settings()
+    if interaction.guild.id not in settings['enabled_servers']:
+        settings['enabled_servers'].append(interaction.guild.id)
+        save_settings(settings)
+        await interaction.response.send_message('✅ Auto-mute and camera-off enabled for this server!')
+    else:
+        await interaction.response.send_message('✅ Bot is already enabled for this server!')
+
+@tree.command(name="disable", description="Disable bot for this server")
+async def slash_disable(interaction: discord.Interaction):
+    """Disable auto-mute and camera-off for this server"""
+    if interaction.guild is None:
+        await interaction.response.send_message('❌ This command can only be used in a server!', ephemeral=True)
+        return
+    
+    if not is_admin_or_assigned_interaction(interaction):
+        await interaction.response.send_message('❌ You do not have permission to use this command. Only admins or assigned admins can enable/disable the bot.', ephemeral=True)
+        return
+    
+    settings = load_settings()
+    if interaction.guild.id in settings['enabled_servers']:
+        settings['enabled_servers'].remove(interaction.guild.id)
+        save_settings(settings)
+        await interaction.response.send_message('❌ Auto-mute and camera-off disabled for this server.')
+    else:
+        await interaction.response.send_message('⚠️ Bot is already disabled for this server.')
+
+@tree.command(name="toggle_automute", description="Turn auto-mute feature ON/OFF")
+async def slash_toggle_automute(interaction: discord.Interaction):
+    """Toggle auto-mute feature on/off"""
+    if interaction.guild is None:
+        await interaction.response.send_message('❌ This command can only be used in a server!', ephemeral=True)
+        return
+    
+    if not is_admin_or_assigned_interaction(interaction):
+        await interaction.response.send_message('❌ You do not have permission to use this command. Only admins or assigned admins can change settings.', ephemeral=True)
+        return
+    
+    settings = load_settings()
+    settings['auto_mute'] = not settings['auto_mute']
+    save_settings(settings)
+    status = 'enabled' if settings['auto_mute'] else 'disabled'
+    emoji = '✅' if settings['auto_mute'] else '❌'
+    await interaction.response.send_message(
+        f'{emoji} **Auto-mute is now {status}!**\n'
+        f'When {status}, members will {"be automatically muted" if settings["auto_mute"] else "NOT be muted"} when joining voice channels.'
+    )
+
+@tree.command(name="toggle_autocam", description="Turn auto camera-off feature ON/OFF")
+async def slash_toggle_autocam(interaction: discord.Interaction):
+    """Toggle auto camera-off feature on/off"""
+    if interaction.guild is None:
+        await interaction.response.send_message('❌ This command can only be used in a server!', ephemeral=True)
+        return
+    
+    if not is_admin_or_assigned_interaction(interaction):
+        await interaction.response.send_message('❌ You do not have permission to use this command. Only admins or assigned admins can change settings.', ephemeral=True)
+        return
+    
+    settings = load_settings()
+    settings['auto_camera_off'] = not settings['auto_camera_off']
+    save_settings(settings)
+    status = 'enabled' if settings['auto_camera_off'] else 'disabled'
+    emoji = '✅' if settings['auto_camera_off'] else '❌'
+    await interaction.response.send_message(
+        f'{emoji} **Auto camera-off is now {status}!**\n'
+        f'When {status}, members will have camera/audio {"disabled" if settings["auto_camera_off"] else "enabled"} by default when joining voice.'
+    )
+
+@tree.command(name="mute", description="Mute a specific member")
+@app_commands.describe(member="The member to mute")
+async def slash_mute(interaction: discord.Interaction, member: discord.Member):
+    """Mute a specific member"""
+    if interaction.guild is None:
+        await interaction.response.send_message('❌ This command can only be used in a server!', ephemeral=True)
+        return
+    
+    if not is_allowed_member_interaction(interaction):
+        await interaction.response.send_message('❌ You do not have permission to use this command. Ask an admin to add you to the allowed list.', ephemeral=True)
+        return
+    
+    if member.voice and member.voice.channel:
+        try:
+            await member.edit(mute=True)
+            await interaction.response.send_message(f'🔇 Muted {member.mention}')
+        except discord.Forbidden:
+            await interaction.response.send_message('❌ No permission to mute this member.', ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f'❌ Error: {e}', ephemeral=True)
+    else:
+        await interaction.response.send_message('❌ Member is not in a voice channel.', ephemeral=True)
+
+@tree.command(name="unmute", description="Unmute a specific member")
+@app_commands.describe(member="The member to unmute")
+async def slash_unmute(interaction: discord.Interaction, member: discord.Member):
+    """Unmute a specific member"""
+    if interaction.guild is None:
+        await interaction.response.send_message('❌ This command can only be used in a server!', ephemeral=True)
+        return
+    
+    if not is_allowed_member_interaction(interaction):
+        await interaction.response.send_message('❌ You do not have permission to use this command. Ask an admin to add you to the allowed list.', ephemeral=True)
+        return
+    
+    if member.voice and member.voice.channel:
+        try:
+            await member.edit(mute=False)
+            await interaction.response.send_message(f'🔊 Unmuted {member.mention}')
+        except discord.Forbidden:
+            await interaction.response.send_message('❌ No permission to unmute this member.', ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f'❌ Error: {e}', ephemeral=True)
+    else:
+        await interaction.response.send_message('❌ Member is not in a voice channel.', ephemeral=True)
+
+@tree.command(name="camon", description="Turn camera/audio ON for a member")
+@app_commands.describe(member="The member to enable camera/audio for (leave empty for yourself)")
+async def slash_camon(interaction: discord.Interaction, member: Optional[discord.Member] = None):
+    """Turn camera on for a member"""
+    if interaction.guild is None:
+        await interaction.response.send_message('❌ This command can only be used in a server!', ephemeral=True)
+        return
+    
+    if not is_allowed_member_interaction(interaction):
+        await interaction.response.send_message('❌ You do not have permission to use this command. Ask an admin to add you to the allowed list.', ephemeral=True)
+        return
+    
+    if member is None:
+        member = interaction.user
+    
+    if member.voice and member.voice.channel:
+        try:
+            await member.edit(mute=False)
+            await interaction.response.send_message(f'✅ Camera/audio enabled for {member.mention}')
+        except discord.Forbidden:
+            await interaction.response.send_message('❌ No permission to modify this member.', ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f'❌ Error: {e}', ephemeral=True)
+    else:
+        await interaction.response.send_message('❌ Member is not in a voice channel.', ephemeral=True)
+
+@tree.command(name="camoff", description="Turn camera/audio OFF for a member")
+@app_commands.describe(member="The member to disable camera/audio for (leave empty for yourself)")
+async def slash_camoff(interaction: discord.Interaction, member: Optional[discord.Member] = None):
+    """Turn camera off for a member"""
+    if interaction.guild is None:
+        await interaction.response.send_message('❌ This command can only be used in a server!', ephemeral=True)
+        return
+    
+    if not is_allowed_member_interaction(interaction):
+        await interaction.response.send_message('❌ You do not have permission to use this command. Ask an admin to add you to the allowed list.', ephemeral=True)
+        return
+    
+    if member is None:
+        member = interaction.user
+    
+    if member.voice and member.voice.channel:
+        try:
+            await member.edit(mute=True)
+            await interaction.response.send_message(f'✅ Camera/audio disabled for {member.mention}')
+        except discord.Forbidden:
+            await interaction.response.send_message('❌ No permission to modify this member.', ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f'❌ Error: {e}', ephemeral=True)
+    else:
+        await interaction.response.send_message('❌ Member is not in a voice channel.', ephemeral=True)
+
+@tree.command(name="allow", description="Allow a member to use mute/camera commands")
+@app_commands.describe(member="The member to allow")
+async def slash_allow(interaction: discord.Interaction, member: discord.Member):
+    """Allow a member to use mute/unmute and camera commands"""
+    if interaction.guild is None:
+        await interaction.response.send_message('❌ This command can only be used in a server!', ephemeral=True)
+        return
+    
+    if not is_admin_or_assigned_interaction(interaction):
+        await interaction.response.send_message('❌ You do not have permission to use this command. Only admins or assigned admins can manage allowed members.', ephemeral=True)
+        return
+    
+    settings = load_settings()
+    server_id = str(interaction.guild.id)
+    
+    if 'allowed_members' not in settings:
+        settings['allowed_members'] = {}
+    if server_id not in settings['allowed_members']:
+        settings['allowed_members'][server_id] = []
+    
+    if member.id in settings['allowed_members'][server_id]:
+        await interaction.response.send_message(f'⚠️ {member.mention} is already allowed to use mute/camera commands.', ephemeral=True)
+        return
+    
+    settings['allowed_members'][server_id].append(member.id)
+    save_settings(settings)
+    
+    await interaction.response.send_message(
+        f'✅ **{member.mention} is now allowed to use mute/unmute and camera commands!**\n'
+        f'They can now use: `/mute`, `/unmute`, `/camon`, `/camoff`'
+    )
+
+@tree.command(name="remove", description="Remove a member from allowed list")
+@app_commands.describe(member="The member to remove from allowed list")
+async def slash_remove(interaction: discord.Interaction, member: discord.Member):
+    """Remove a member from allowed list"""
+    if interaction.guild is None:
+        await interaction.response.send_message('❌ This command can only be used in a server!', ephemeral=True)
+        return
+    
+    if not is_admin_or_assigned_interaction(interaction):
+        await interaction.response.send_message('❌ You do not have permission to use this command. Only admins or assigned admins can manage allowed members.', ephemeral=True)
+        return
+    
+    settings = load_settings()
+    server_id = str(interaction.guild.id)
+    
+    if 'allowed_members' not in settings or server_id not in settings['allowed_members']:
+        await interaction.response.send_message(f'⚠️ {member.mention} is not in the allowed list.', ephemeral=True)
+        return
+    
+    if member.id not in settings['allowed_members'][server_id]:
+        await interaction.response.send_message(f'⚠️ {member.mention} is not in the allowed list.', ephemeral=True)
+        return
+    
+    settings['allowed_members'][server_id].remove(member.id)
+    save_settings(settings)
+    
+    await interaction.response.send_message(
+        f'❌ **{member.mention} has been removed from the allowed list.**\n'
+        f'They can no longer use mute/camera commands (unless they are admin).'
+    )
+
+@tree.command(name="assign_admin", description="Assign admin permissions to a member")
+@app_commands.describe(member="The member to assign admin permissions to")
+async def slash_assign_admin(interaction: discord.Interaction, member: discord.Member):
+    """Assign admin permissions to a member"""
+    if interaction.guild is None:
+        await interaction.response.send_message('❌ This command can only be used in a server!', ephemeral=True)
+        return
+    
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message('❌ Only Discord administrators can assign admin permissions to others.', ephemeral=True)
+        return
+    
+    settings = load_settings()
+    server_id = str(interaction.guild.id)
+    
+    if 'assigned_admins' not in settings:
+        settings['assigned_admins'] = {}
+    if server_id not in settings['assigned_admins']:
+        settings['assigned_admins'][server_id] = []
+    
+    if member.id in settings['assigned_admins'][server_id]:
+        await interaction.response.send_message(f'⚠️ {member.mention} is already an assigned admin.', ephemeral=True)
+        return
+    
+    if member.guild_permissions.administrator:
+        await interaction.response.send_message(f'ℹ️ {member.mention} is already a Discord administrator. No need to assign admin permissions.', ephemeral=True)
+        return
+    
+    settings['assigned_admins'][server_id].append(member.id)
+    save_settings(settings)
+    
+    await interaction.response.send_message(
+        f'✅ **{member.mention} is now an assigned admin!**\n'
+        f'They can now use all admin commands.'
+    )
+
+@tree.command(name="sync", description="Sync slash commands (Admin only)")
+async def slash_sync(interaction: discord.Interaction):
+    """Manually sync slash commands"""
+    if interaction.guild is None:
+        await interaction.response.send_message('❌ This command can only be used in a server!', ephemeral=True)
+        return
+    
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message('❌ Only administrators can sync commands.', ephemeral=True)
+        return
+    
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        synced = await tree.sync()
+        await interaction.followup.send(f'✅ Successfully synced {len(synced)} slash command(s)!', ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f'❌ Failed to sync commands: {e}', ephemeral=True)
+
+@tree.command(name="help", description="Show all available commands")
+async def slash_help(interaction: discord.Interaction):
+    """Show all available commands"""
+    embed = discord.Embed(
+        title='🤖 Seerror Bot Commands',
+        description='All available slash commands for this bot',
+        color=discord.Color.green()
+    )
+    
+    embed.add_field(
+        name='⚙️ **Customization Commands** (Admin Only)',
+        value='''
+`/settings` - View current bot settings
+`/toggle_automute` - Turn auto-mute ON/OFF
+`/toggle_autocam` - Turn auto camera-off ON/OFF
+`/enable` - Enable bot for this server
+`/disable` - Disable bot for this server
+        ''',
+        inline=False
+    )
+    
+    embed.add_field(
+        name='👥 **Member Control Commands** (Admin or Allowed Members)',
+        value='''
+`/mute <member>` - Mute a specific member
+`/unmute <member>` - Unmute a specific member
+`/camon [member]` - Turn camera/audio ON for member
+`/camoff [member]` - Turn camera/audio OFF for member
+        ''',
+        inline=False
+    )
+    
+    embed.add_field(
+        name='👑 **Admin Commands** (Discord Admin Only)',
+        value='''
+`/assign_admin <member>` - Assign admin permissions to member
+        ''',
+        inline=False
+    )
+    
+    embed.add_field(
+        name='➕ **Member Permission Commands** (Admin or Assigned Admin Only)',
+        value='''
+`/allow <member>` - Allow member to use mute/camera commands
+`/remove <member>` - Remove member from allowed list
+        ''',
+        inline=False
+    )
+    
+    embed.set_footer(text='💡 Tip: Type "/" to see all available commands!')
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # Error handling
 @bot.event

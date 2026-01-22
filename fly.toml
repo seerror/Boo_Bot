@@ -1,25 +1,26 @@
-# Fly.io configuration file
-# Generated for Discord Bot deployment
+# fly.toml app configuration file generated for your-bot-name-bold-dew-8374 on 2026-01-13T19:28:17+05:30
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
-app = "your-bot-name"  # Change this to your app name
-primary_region = "iad"  # Change to your preferred region (iad = Washington DC, ord = Chicago, etc.)
-
-[build]
-
-[env]
-  # Environment variables will be set via fly secrets
+app = 'boo-bot'
+primary_region = 'iad'
 
 [experimental]
   auto_rollback = true
 
-# Discord bots don't need HTTP services, they just run continuously
-# No services section needed - the app runs as a process
+[build]
 
 [deploy]
-  strategy = "immediate"
+  strategy = 'immediate'
 
-# VM configuration
+# Discord bots don't need HTTP services - they run as processes
+# Remove http_service section and use process configuration instead
+
+[processes]
+  app = "python bot.py"
+
 [[vm]]
-  cpu_kind = "shared"
+  cpu_kind = 'shared'
   cpus = 1
   memory_mb = 256
